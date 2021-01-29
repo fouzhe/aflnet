@@ -377,6 +377,7 @@ char **was_fuzzed_map = NULL; /* A 2D array keeping state-specific was_fuzzed in
 u32 fuzzed_map_states = 0;
 u32 fuzzed_map_qentries = 0;
 u32 max_seed_region_count = 0;
+u32 local_port;		/* TCP/UDP port number to use as source */
 
 /* flags */
 u8 use_net = 0;
@@ -763,7 +764,7 @@ void update_state_aware_variables(struct queue_entry *q, u8 dry_run)
   state_info_t *state;
   unsigned int state_count;
 
-  if (!response_buf_size) return;
+  if (!response_buf_size || !response_bytes) return;
 
   unsigned int *state_sequence = (*extract_response_codes)(response_buf, response_buf_size, &state_count);
 
@@ -783,9 +784,9 @@ void update_state_aware_variables(struct queue_entry *q, u8 dry_run)
 
       for(i=1; i < state_count; i++) {
         unsigned int curStateID = state_sequence[i];
-        char fromState[10], toState[10];
-        sprintf(fromState, "%d", prevStateID);
-        sprintf(toState, "%d", curStateID);
+        char fromState[STATE_STR_LEN], toState[STATE_STR_LEN];
+        snprintf(fromState, STATE_STR_LEN, "%d", prevStateID);
+        snprintf(toState, STATE_STR_LEN, "%d", curStateID);
 
         //Check if the prevStateID and curStateID have been added to the state machine as vertices
         //Check also if the edge prevStateID->curStateID has been added
@@ -979,11 +980,6 @@ void update_state_aware_variables(struct queue_entry *q, u8 dry_run)
 
   //Free state sequence
   if (state_sequence) ck_free(state_sequence);
-
-  /* save the seed to file for debugging purpose */
-  u8 *fn = alloc_printf("%s/replayable-queue/%s", out_dir, basename(q->fname));
-  save_kl_messages_to_file(kl_messages, fn, 1, messages_sent);
-  ck_free(fn);
 }
 
 /* Send (mutated) messages in order to the server under test */
@@ -992,6 +988,7 @@ int send_over_network()
   int n;
   u8 likely_buggy = 0;
   struct sockaddr_in serv_addr;
+  struct sockaddr_in local_serv_addr;
 
   //Clean up the server if needed
   if (cleanup_script) system(cleanup_script);
@@ -1034,6 +1031,20 @@ int send_over_network()
   serv_addr.sin_family = AF_INET;
   serv_addr.sin_port = htons(net_port);
   serv_addr.sin_addr.s_addr = inet_addr(net_ip);
+
+  //This piece of code is only used for targets that send responses to a specific port number
+  //The Kamailio SIP server is an example. After running this code, the intialized sockfd 
+  //will be bound to the given local port
+  if(local_port > 0) {
+    local_serv_addr.sin_family = AF_INET;
+    local_serv_addr.sin_addr.s_addr = INADDR_ANY;
+    local_serv_addr.sin_port = htons(local_port);
+
+    local_serv_addr.sin_addr.s_addr = inet_addr("127.0.0.1");
+    if (bind(sockfd, (struct sockaddr*) &local_serv_addr, sizeof(struct sockaddr_in)))  {
+      FATAL("Unable to bind socket on local source port");
+    }
+  }
 
   if(connect(sockfd, (struct sockaddr *)&serv_addr, sizeof(serv_addr)) < 0) {
     //If it cannot connect to the server under test
@@ -1086,11 +1097,11 @@ HANDLE_RESPONSES:
 
   net_recv(sockfd, timeout, poll_wait_msecs, &response_buf, &response_buf_size);
 
-  if (messages_sent > 0) {
+  if (messages_sent > 0 && response_bytes != NULL) {
     response_bytes[messages_sent - 1] = response_buf_size;
   }
 
-  //wait a bit letting the server to complete its remaing task(s)
+  //wait a bit letting the server to complete its remaining task(s)
   memset(session_virgin_bits, 255, MAP_SIZE);
   while(1) {
     if (has_new_bits(session_virgin_bits) != 2) break;
@@ -3565,6 +3576,11 @@ static void perform_dry_run(char** argv) {
     /* Update state-aware variables (e.g., state machine, regions and their annotations */
     if (state_aware_mode) update_state_aware_variables(q, 1);
 
+    /* save the seed to file for replaying */
+    u8 *fn_replay = alloc_printf("%s/replayable-queue/%s", out_dir, basename(q->fname));
+    save_kl_messages_to_file(kl_messages, fn_replay, 1, messages_sent);
+    ck_free(fn_replay);
+
     /* AFLNet delete the kl_messages */
     delete_kl_messages(kl_messages);
 
@@ -3993,6 +4009,11 @@ static u8 save_if_interesting(char** argv, void* mem, u32 len, u8 fault) {
     add_to_queue(fn, full_len, 0);
 
     if (state_aware_mode) update_state_aware_variables(queue_top, 0);
+
+    /* save the seed to file for replaying */
+    u8 *fn_replay = alloc_printf("%s/replayable-queue/%s", out_dir, basename(queue_top->fname));
+    save_kl_messages_to_file(kl_messages, fn_replay, 1, messages_sent);
+    ck_free(fn_replay);
 
     if (hnb == 2) {
       queue_top->has_new_cov = 1;
@@ -8067,7 +8088,7 @@ static void usage(u8* argv0) {
        "Settings for network protocol fuzzing (AFLNet):\n\n"
 
        "  -N netinfo    - server information (e.g., tcp://127.0.0.1/8554)\n"
-       "  -P protocol   - application protocol to be tested (e.g., RTSP, FTP, DTLS12, DNS)\n"
+       "  -P protocol   - application protocol to be tested (e.g., RTSP, FTP, DTLS12, DNS, SMTP, SSH, TLS)\n"
        "  -D usec       - waiting time (in micro seconds) for the server to initialize\n"
        "  -W msec       - waiting time (in miliseconds) for receiving the first response to each input sent\n"
        "  -w usec       - waiting time (in micro seconds) for receiving follow-up responses\n"
@@ -8758,7 +8779,7 @@ int main(int argc, char** argv) {
   gettimeofday(&tv, &tz);
   srandom(tv.tv_sec ^ tv.tv_usec ^ getpid());
 
-  while ((opt = getopt(argc, argv, "+i:o:f:m:t:T:dnCB:S:M:x:QN:D:W:w:P:KEq:s:RFc:")) > 0)
+  while ((opt = getopt(argc, argv, "+i:o:f:m:t:T:dnCB:S:M:x:QN:D:W:w:P:KEq:s:RFc:l:")) > 0)
 
     switch (opt) {
 
@@ -8981,6 +9002,12 @@ int main(int argc, char** argv) {
         } else if (!strcmp(optarg, "TLS")) {
           extract_requests = &extract_requests_tls;
           extract_response_codes = &extract_response_codes_tls;
+        } else if (!strcmp(optarg, "SIP")) {
+          extract_requests = &extract_requests_sip;
+          extract_response_codes = &extract_response_codes_sip;
+        } else if (!strcmp(optarg, "HTTP")) {
+          extract_requests = &extract_requests_http;
+          extract_response_codes = &extract_response_codes_http;
         } else {
           FATAL("%s protocol is not supported yet!", optarg);
         }
@@ -9021,6 +9048,15 @@ int main(int argc, char** argv) {
 
         if (cleanup_script) FATAL("Multiple -c options not supported");
         cleanup_script = optarg;
+        break;
+
+      case 'l': /* local port to connect from */
+        //This option is only used for targets that send responses to a specific port number
+        //The Kamailio SIP server is an example
+
+        if (local_port) FATAL("Multiple -l options not supported");
+        local_port = atoi(optarg);
+	      if (local_port < 1024 || local_port > 65535) FATAL("Invalid source port number");
         break;
 
       default:
@@ -9139,6 +9175,11 @@ int main(int argc, char** argv) {
   }
 
   if (state_aware_mode) {
+
+    if (state_ids_count == 0) {
+      PFATAL("No server states have been detected. Server responses are likely empty!");
+    }
+
     while (1) {
       u8 skipped_fuzz;
 

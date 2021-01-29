@@ -321,13 +321,13 @@ region_t* extract_requests_dicom(unsigned char* buf, unsigned int buf_size, unsi
   unsigned int byte_count = 0;
   while (byte_count < buf_size) {
 
-    if ((byte_count + 2 >= buf_size) || (byte_count + 5 >= buf_size)) break; 
-    
+    if ((byte_count + 2 >= buf_size) || (byte_count + 5 >= buf_size)) break;
+
     // Bytes from third to sixth encode the PDU length.
-    pdu_length = 
-      (buf[byte_count + 5]) | 
-      (buf[byte_count + 4] << 8)  | 
-      (buf[byte_count + 3] << 16) | 
+    pdu_length =
+      (buf[byte_count + 5]) |
+      (buf[byte_count + 4] << 8)  |
+      (buf[byte_count + 3] << 16) |
       (buf[byte_count + 2] << 24);
 
     // DICOM Header(6 bytes) includes PDU type and PDU length.
@@ -508,6 +508,151 @@ region_t* extract_requests_rtsp(unsigned char* buf, unsigned int buf_size, unsig
 }
 
 region_t* extract_requests_ftp(unsigned char* buf, unsigned int buf_size, unsigned int* region_count_ref)
+{
+  char *mem;
+  unsigned int byte_count = 0;
+  unsigned int mem_count = 0;
+  unsigned int mem_size = 1024;
+  unsigned int region_count = 0;
+  region_t *regions = NULL;
+  char terminator[2] = {0x0D, 0x0A};
+
+  mem=(char *)ck_alloc(mem_size);
+
+  unsigned int cur_start = 0;
+  unsigned int cur_end = 0;
+  while (byte_count < buf_size) {
+
+    memcpy(&mem[mem_count], buf + byte_count++, 1);
+
+    //Check if the last two bytes are 0x0D0A
+    if ((mem_count > 1) && (memcmp(&mem[mem_count - 1], terminator, 2) == 0)) {
+      region_count++;
+      regions = (region_t *)ck_realloc(regions, region_count * sizeof(region_t));
+      regions[region_count - 1].start_byte = cur_start;
+      regions[region_count - 1].end_byte = cur_end;
+      regions[region_count - 1].state_sequence = NULL;
+      regions[region_count - 1].state_count = 0;
+
+      mem_count = 0;
+      cur_start = cur_end + 1;
+      cur_end = cur_start;
+    } else {
+      mem_count++;
+      cur_end++;
+
+      //Check if the last byte has been reached
+      if (cur_end == buf_size - 1) {
+        region_count++;
+        regions = (region_t *)ck_realloc(regions, region_count * sizeof(region_t));
+        regions[region_count - 1].start_byte = cur_start;
+        regions[region_count - 1].end_byte = cur_end;
+        regions[region_count - 1].state_sequence = NULL;
+        regions[region_count - 1].state_count = 0;
+        break;
+      }
+
+      if (mem_count == mem_size) {
+        //enlarge the mem buffer
+        mem_size = mem_size * 2;
+        mem=(char *)ck_realloc(mem, mem_size);
+      }
+    }
+  }
+  if (mem) ck_free(mem);
+
+  //in case region_count equals zero, it means that the structure of the buffer is broken
+  //hence we create one region for the whole buffer
+  if ((region_count == 0) && (buf_size > 0)) {
+    regions = (region_t *)ck_realloc(regions, sizeof(region_t));
+    regions[0].start_byte = 0;
+    regions[0].end_byte = buf_size - 1;
+    regions[0].state_sequence = NULL;
+    regions[0].state_count = 0;
+
+    region_count = 1;
+  }
+
+  *region_count_ref = region_count;
+  return regions;
+}
+
+region_t* extract_requests_sip(unsigned char* buf, unsigned int buf_size, unsigned int* region_count_ref)
+{
+  char *mem;
+  unsigned int byte_count = 0;
+  unsigned int mem_count = 0;
+  unsigned int mem_size = 1024;
+  unsigned int region_count = 0;
+  region_t *regions = NULL;
+  char terminator[2] = {0x0D, 0x0A};
+
+  mem=(char *)ck_alloc(mem_size);
+
+  unsigned int cur_start = 0;
+  unsigned int cur_end = 0;
+  while (byte_count < buf_size) {
+
+    memcpy(&mem[mem_count], buf + byte_count++, 1);
+
+    //Check if the last bytes match the terminator, and the next ones are a SIP command
+    if ((mem_count > 1) && (memcmp(&mem[mem_count - 1], terminator, 1) == 0) &&
+	  (((buf_size - byte_count >= 8) && (memcmp(buf + byte_count, "REGISTER", 8)==0) ) ||
+	  ((buf_size - byte_count >= 6) && (memcmp(buf + byte_count, "INVITE", 6)==0) ) ||
+	  ((buf_size - byte_count >= 3) && (memcmp(buf + byte_count, "ACK", 3)==0) ) ||
+	  ((buf_size - byte_count >= 3) && (memcmp(buf + byte_count, "BYE", 3)==0) ) )
+	  ) {
+      region_count++;
+      regions = (region_t *)ck_realloc(regions, region_count * sizeof(region_t));
+      regions[region_count - 1].start_byte = cur_start;
+      regions[region_count - 1].end_byte = cur_end;
+      regions[region_count - 1].state_sequence = NULL;
+      regions[region_count - 1].state_count = 0;
+
+      mem_count = 0;
+      cur_start = cur_end + 1;
+      cur_end = cur_start;
+    } else {
+      mem_count++;
+      cur_end++;
+
+      //Check if the last byte has been reached
+      if (cur_end == buf_size - 1) {
+        region_count++;
+        regions = (region_t *)ck_realloc(regions, region_count * sizeof(region_t));
+        regions[region_count - 1].start_byte = cur_start;
+        regions[region_count - 1].end_byte = cur_end;
+        regions[region_count - 1].state_sequence = NULL;
+        regions[region_count - 1].state_count = 0;
+        break;
+      }
+
+      if (mem_count == mem_size) {
+        //enlarge the mem buffer
+        mem_size = mem_size * 2;
+        mem=(char *)ck_realloc(mem, mem_size);
+      }
+    }
+  }
+  if (mem) ck_free(mem);
+
+  //in case region_count equals zero, it means that the structure of the buffer is broken
+  //hence we create one region for the whole buffer
+  if ((region_count == 0) && (buf_size > 0)) {
+    regions = (region_t *)ck_realloc(regions, sizeof(region_t));
+    regions[0].start_byte = 0;
+    regions[0].end_byte = buf_size - 1;
+    regions[0].state_sequence = NULL;
+    regions[0].state_count = 0;
+
+    region_count = 1;
+  }
+
+  *region_count_ref = region_count;
+  return regions;
+}
+
+region_t* extract_requests_http(unsigned char* buf, unsigned int buf_size, unsigned int* region_count_ref)
 {
   char *mem;
   unsigned int byte_count = 0;
@@ -1109,6 +1254,110 @@ unsigned int* extract_response_codes_ftp(unsigned char* buf, unsigned int buf_si
   return state_sequence;
 }
 
+unsigned int* extract_response_codes_sip(unsigned char* buf, unsigned int buf_size, unsigned int* state_count_ref)
+{
+  char *mem;
+  unsigned int byte_count = 0;
+  unsigned int mem_count = 0;
+  unsigned int mem_size = 1024;
+  unsigned int *state_sequence = NULL;
+  unsigned int state_count = 0;
+  char terminator[2] = {0x0D, 0x0A};
+  char sip[4] = {0x53, 0x49, 0x50, 0x2f};
+
+  mem=(char *)ck_alloc(mem_size);
+
+  state_count++;
+  state_sequence = (unsigned int *)ck_realloc(state_sequence, state_count * sizeof(unsigned int));
+  state_sequence[state_count - 1] = 0;
+
+  while (byte_count < buf_size) {
+    memcpy(&mem[mem_count], buf + byte_count++, 1);
+
+    //Check if the last two bytes are 0x0D0A
+    if ((mem_count > 0) && (memcmp(&mem[mem_count - 1], terminator, 2) == 0)) {
+      if ((mem_count >= 4) && (memcmp(mem, sip, 4) == 0)) {
+        //Extract the response code which is the first 3 bytes
+        char temp[4];
+        memcpy(temp, &mem[8], 4);
+        temp[3] = 0x0;
+        unsigned int message_code = (unsigned int) atoi(temp);
+
+        if (message_code == 0) break;
+
+        state_count++;
+        state_sequence = (unsigned int *)ck_realloc(state_sequence, state_count * sizeof(unsigned int));
+        state_sequence[state_count - 1] = message_code;
+        mem_count = 0;
+      } else {
+        mem_count = 0;
+      }
+    } else {
+      mem_count++;
+      if (mem_count == mem_size) {
+        //enlarge the mem buffer
+        mem_size = mem_size * 2;
+        mem=(char *)ck_realloc(mem, mem_size);
+      }
+    }
+  }
+  if (mem) ck_free(mem);
+  *state_count_ref = state_count;
+  return state_sequence;
+}
+
+unsigned int* extract_response_codes_http(unsigned char* buf, unsigned int buf_size, unsigned int* state_count_ref)
+{
+  char *mem;
+  unsigned int byte_count = 0;
+  unsigned int mem_count = 0;
+  unsigned int mem_size = 1024;
+  unsigned int *state_sequence = NULL;
+  unsigned int state_count = 0;
+  char terminator[2] = {0x0D, 0x0A};
+  char http[5] = {0x48, 0x54, 0x54, 0x50, 0x2f};
+
+  mem=(char *)ck_alloc(mem_size);
+
+  state_count++;
+  state_sequence = (unsigned int *)ck_realloc(state_sequence, state_count * sizeof(unsigned int));
+  state_sequence[state_count - 1] = 0;
+
+  while (byte_count < buf_size) {
+    memcpy(&mem[mem_count], buf + byte_count++, 1);
+
+    //Check if the last two bytes are 0x0D0A
+    if ((mem_count > 0) && (memcmp(&mem[mem_count - 1], terminator, 2) == 0)) {
+      if ((mem_count >= 5) && (memcmp(mem, http, 5) == 0)) {
+        //Extract the response code which is the first 3 bytes
+        char temp[4];
+        memcpy(temp, &mem[9], 4);
+        temp[3] = 0x0;
+        unsigned int message_code = (unsigned int) atoi(temp);
+
+        if (message_code == 0) break;
+
+        state_count++;
+        state_sequence = (unsigned int *)ck_realloc(state_sequence, state_count * sizeof(unsigned int));
+        state_sequence[state_count - 1] = message_code;
+        mem_count = 0;
+      } else {
+        mem_count = 0;
+      }
+    } else {
+      mem_count++;
+      if (mem_count == mem_size) {
+        //enlarge the mem buffer
+        mem_size = mem_size * 2;
+        mem=(char *)ck_realloc(mem, mem_size);
+      }
+    }
+  }
+  if (mem) ck_free(mem);
+  *state_count_ref = state_count;
+  return state_sequence;
+}
+
 // kl_messages manipulating functions
 
 klist_t(lms) *construct_kl_messages(u8* fname, region_t *regions, u32 region_count)
@@ -1281,8 +1530,9 @@ int net_recv(int sockfd, struct timeval timeout, int poll_w, char **response_buf
       }
       while (n > 0) {
         usleep(10);
-        *response_buf = (unsigned char *)ck_realloc(*response_buf, *len + n);
+        *response_buf = (unsigned char *)ck_realloc(*response_buf, *len + n + 1);
         memcpy(&(*response_buf)[*len], temp_buf, n);
+        (*response_buf)[(*len) + n] = '\0';
         *len = *len + n;
         n = recv(sockfd, temp_buf, sizeof(temp_buf), 0);
         if ((n < 0) && (errno != EAGAIN)) {
@@ -1413,16 +1663,16 @@ u8* state_sequence_to_string(unsigned int *stateSequence, unsigned int stateCoun
 
   u8 *out = NULL;
 
-  char strState[10];
-  int len = 0;
+  char strState[STATE_STR_LEN];
+  size_t len = 0;
   for (i = 0; i < stateCount; i++) {
     //Limit the loop to shorten the output string
     if ((i >= 2) && (stateSequence[i] == stateSequence[i - 1]) && (stateSequence[i] == stateSequence[i - 2])) continue;
     unsigned int stateID = stateSequence[i];
     if (i == stateCount - 1) {
-      sprintf(strState, "%d", (int) stateID);
+      snprintf(strState, STATE_STR_LEN, "%d", (int) stateID);
     } else {
-      sprintf(strState, "%d-", (int) stateID);
+      snprintf(strState, STATE_STR_LEN, "%d-", (int) stateID);
     }
     out = (u8 *)ck_realloc(out, len + strlen(strState) + 1);
     memcpy(&out[len], strState, strlen(strState) + 1);
@@ -1430,12 +1680,12 @@ u8* state_sequence_to_string(unsigned int *stateSequence, unsigned int stateCoun
     //As Linux limit the size of the file name
     //we set a fixed upper bound here
     if (len > 150 && (i + 1 < stateCount)) {
-      sprintf(strState, "%s", "end-at-");
+      snprintf(strState, STATE_STR_LEN, "%s", "end-at-");
       out = (u8 *)ck_realloc(out, len + strlen(strState) + 1);
       memcpy(&out[len], strState, strlen(strState) + 1);
       len=strlen(out);
 
-      sprintf(strState, "%d", (int) stateSequence[stateCount - 1]);
+      snprintf(strState, STATE_STR_LEN, "%d", (int) stateSequence[stateCount - 1]);
       out = (u8 *)ck_realloc(out, len + strlen(strState) + 1);
       memcpy(&out[len], strState, strlen(strState) + 1);
       len=strlen(out);

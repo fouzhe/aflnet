@@ -10,6 +10,7 @@ afl-fuzz
 afl-g++
 afl-gcc
 afl-gotcpu
+afl-replay
 afl-showmap
 afl-tmin
 aflnet-replay

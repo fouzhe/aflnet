@@ -1,12 +1,29 @@
 #include <stdio.h>
 #include <time.h>
 #include <unistd.h>
+#include <sys/stat.h>
+#include <sys/file.h>
 #include "alloc-inl.h"
 #include "aflnet.h"
 
 #define server_wait_usecs 10000
 
 unsigned int* (*extract_response_codes)(unsigned char* buf, unsigned int buf_size, unsigned int* state_count_ref) = NULL;
+
+char *get_test_case(char* packet_file, int *fsize)
+{
+  /* open packet file */
+  s32 fd = open(packet_file, O_RDONLY);
+
+  *fsize = lseek(fd, 0, SEEK_END);
+  lseek(fd, 0, SEEK_SET);
+
+  /* allocate buffer to read the file */
+  char *buf = ck_alloc(*fsize);
+  ck_read(fd, buf, *fsize, "packet file");
+
+  return buf;
+}
 
 /* Expected arguments:
 1. Path to the test case (e.g., crash-triggering input)
@@ -19,22 +36,19 @@ Optional:
 
 int main(int argc, char* argv[])
 {
-  FILE *fp;
   int portno, n;
   struct sockaddr_in serv_addr;
   char* buf = NULL, *response_buf = NULL;
+  int buf_size = 0;
   int response_buf_size = 0;
-  unsigned int size, i, state_count, packet_count = 0;
+  unsigned int i, state_count;
   unsigned int *state_sequence;
   unsigned int socket_timeout = 1000;
   unsigned int poll_timeout = 1;
 
-
   if (argc < 4) {
-    PFATAL("Usage: ./aflnet-replay packet_file protocol port [first_resp_timeout(us) [follow-up_resp_timeout(ms)]]");
+    PFATAL("Usage: ./afl-replay packet_file protocol port [first_resp_timeout(us) [follow-up_resp_timeout(ms)]]");
   }
-
-  fp = fopen(argv[1],"rb");
 
   if (!strcmp(argv[2], "RTSP")) extract_response_codes = &extract_response_codes_rtsp;
   else if (!strcmp(argv[2], "FTP")) extract_response_codes = &extract_response_codes_ftp;
@@ -46,7 +60,7 @@ int main(int argc, char* argv[])
   else if (!strcmp(argv[2], "TLS")) extract_response_codes = &extract_response_codes_tls;
   else if (!strcmp(argv[2], "SIP")) extract_response_codes = &extract_response_codes_sip;
   else if (!strcmp(argv[2], "HTTP")) extract_response_codes = &extract_response_codes_http;
-  else {fprintf(stderr, "[AFLNet-replay] Protocol %s has not been supported yet!\n", argv[2]); exit(1);}
+  else {fprintf(stderr, "[AFL-replay] Protocol %s has not been supported yet!\n", argv[2]); exit(1);}
 
   portno = atoi(argv[3]);
 
@@ -59,12 +73,6 @@ int main(int argc, char* argv[])
 
   //Wait for the server to initialize
   usleep(server_wait_usecs);
-
-  if (response_buf) {
-    ck_free(response_buf);
-    response_buf = NULL;
-    response_buf_size = 0;
-  }
 
   int sockfd;
   if ((!strcmp(argv[2], "DTLS12")) || (!strcmp(argv[2], "SIP"))) {
@@ -105,26 +113,14 @@ int main(int argc, char* argv[])
     }
   }
 
-  //Send requests one by one
-  //And save all the server responses
-  while(!feof(fp)) {
-    if (buf) {ck_free(buf); buf = NULL;}
-    if (fread(&size, sizeof(unsigned int), 1, fp) > 0) {
-      packet_count++;
-    	fprintf(stderr,"\nSize of the current packet %d is  %d\n", packet_count, size);
+  buf = get_test_case(argv[1], &buf_size);
+  
+  //write the requests stored in the generated seed input
+  n = net_send(sockfd, timeout, buf, buf_size);
 
-      buf = (char *)ck_alloc(size);
-      fread(buf, size, 1, fp);
+  //receive server responses
+  net_recv(sockfd, timeout, poll_timeout, &response_buf, &response_buf_size);
 
-      if (net_recv(sockfd, timeout, poll_timeout, &response_buf, &response_buf_size)) break;
-      n = net_send(sockfd, timeout, buf,size);
-      if (n != size) break;
-
-      if (net_recv(sockfd, timeout, poll_timeout, &response_buf, &response_buf_size)) break;
-    }
-  }
-
-  fclose(fp);
   close(sockfd);
 
   //Extract response codes
